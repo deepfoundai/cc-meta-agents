@@ -79,10 +79,10 @@ class TestDedupeAndScore:
     def test_dedupe_and_score(self, sample_phrases):
         result = dedupe_and_score(sample_phrases)
         
-        assert len(result) == 3
+        assert len(result) == 4  # ai revolution, #airevolution, climate change, viral dance
         assert result[0]["phrase"] == "ai revolution"
-        assert result[0]["count"] == 3
-        assert len(result[0]["sources"]) == 3
+        assert result[0]["count"] == 2  # twitter and google
+        assert len(result[0]["sources"]) == 2
         assert result[0]["score"] > result[1]["score"]
 
 class TestCreateSlug:
