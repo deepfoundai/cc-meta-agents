@@ -1,0 +1,138 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Set up SAM CLI
+      uses: aws-actions/setup-sam@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+    - name: Build SAM application
+      run: sam build
+
+    - name: Deploy to AWS
+      run: |
+        sam deploy \
+          --stack-name cc-agent-reconciler-${{ github.event.inputs.environment || 'dev' }} \
+          --s3-bucket ${{ vars.SAM_BUCKET }} \
+          --capabilities CAPABILITY_IAM \
+          --parameter-overrides Environment=${{ github.event.inputs.environment || 'dev' }} \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset
+
+    - name: Get stack outputs
+      run: |
+        aws cloudformation describe-stacks \
+          --stack-name cc-agent-reconciler-${{ github.event.inputs.environment || 'dev' }} \
+          --query 'Stacks[0].Outputs' \
+          --output table
+
+  post-deploy-tests:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event.inputs.environment != 'prod'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+    - name: Run integration tests
+      run: |
+        # Get Lambda function name from stack
+        FUNCTION_NAME=$(aws cloudformation describe-stacks \
+          --stack-name cc-agent-reconciler-${{ github.event.inputs.environment || 'dev' }} \
+          --query 'Stacks[0].Outputs[?OutputKey==`FunctionArn`].OutputValue' \
+          --output text | cut -d: -f7)
+        
+        # Test video.rendered event
+        aws lambda invoke \
+          --function-name $FUNCTION_NAME \
+          --payload '{"source":"aws.events","detail-type":"video.rendered","detail":{"jobId":"test-job-001","userId":"test-user","seconds":10,"model":"default"}}' \
+          response.json
+        
+        # Check response
+        cat response.json
+        
+    - name: Check CloudWatch logs
+      run: |
+        LOG_GROUP="/aws/lambda/cc-agent-reconciler-${{ github.event.inputs.environment || 'dev' }}"
+        
+        # Get latest log stream
+        LATEST_STREAM=$(aws logs describe-log-streams \
+          --log-group-name $LOG_GROUP \
+          --order-by LastEventTime \
+          --descending \
+          --limit 1 \
+          --query 'logStreams[0].logStreamName' \
+          --output text)
+        
+        # Get recent logs
+        aws logs filter-log-events \
+          --log-group-name $LOG_GROUP \
+          --log-stream-names $LATEST_STREAM \
+          --start-time $(date -u -d '5 minutes ago' +%s)000 \
+          --filter-pattern '{ $.level = "error" }'
+
+  rollback:
+    runs-on: ubuntu-latest
+    needs: post-deploy-tests
+    if: failure() && github.event.inputs.environment == 'prod'
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+    - name: Rollback deployment
+      run: |
+        # Get previous version
+        PREVIOUS_VERSION=$(aws cloudformation describe-stack-events \
+          --stack-name cc-agent-reconciler-prod \
+          --query 'StackEvents[?ResourceStatus==`UPDATE_COMPLETE` && ResourceType==`AWS::CloudFormation::Stack`].PhysicalResourceId | [1]' \
+          --output text)
+        
+        echo "Rolling back to version: $PREVIOUS_VERSION"
+        
+        # Trigger rollback
+        aws cloudformation cancel-update-stack \
+          --stack-name cc-agent-reconciler-prod || true

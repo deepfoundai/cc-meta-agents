@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Agent-02 Prompt Template Curator
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  AWSRegion:
+    Type: String
+    Default: us-east-1
+  LLMModel:
+    Type: String
+    Default: gpt-4
+  OpenAIAPIKey:
+    Type: String
+    NoEcho: true
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 256
+    Runtime: python3.12
+    Environment:
+      Variables:
+        AWS_REGION: !Ref AWSRegion
+        LLM_MODEL: !Ref LLMModel
+        OPENAI_API_KEY: !Ref OpenAIAPIKey
+
+Resources:
+  PromptCuratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: src.handler.lambda_handler
+      Environment:
+        Variables:
+          DDB_TABLE_NAME: !Ref PromptTemplatesTable
+          S3_BUCKET: !Ref PromptTemplatesBucket
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 6 * * ? *)
+            Description: Daily prompt template curation at 06:00 UTC
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PromptTemplatesTable
+        - S3CrudPolicy:
+            BucketName: !Ref PromptTemplatesBucket
+        - EventBridgePutEventsPolicy:
+            EventBusName: default
+        - CloudWatchPutMetricPolicy: {}
+
+  PromptTemplatesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub cc-prompt-templates-${Environment}
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: slug
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        - AttributeName: slug
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  PromptTemplatesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub cc-prompt-templates-${Environment}
+      PublicReadPolicy:
+        RestrictPublicBuckets: false
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  PromptTemplatesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PromptTemplatesBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub ${PromptTemplatesBucket}/*
+
+Outputs:
+  PromptCuratorFunctionArn:
+    Description: Prompt Curator Lambda Function ARN
+    Value: !GetAtt PromptCuratorFunction.Arn
+  PromptTemplatesTableName:
+    Description: DynamoDB table name
+    Value: !Ref PromptTemplatesTable
+  PromptTemplatesBucketName:
+    Description: S3 bucket name
+    Value: !Ref PromptTemplatesBucket

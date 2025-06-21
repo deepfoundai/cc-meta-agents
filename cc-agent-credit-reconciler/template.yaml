@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Credit Reconciler Agent - Keeps user credit ledger aligned with video generation work
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        POWERTOOLS_SERVICE_NAME: credit-reconciler
+        LOG_LEVEL: INFO
+
+Resources:
+  # Lambda Function
+  ReconcilerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub cc-agent-reconciler-${Environment}
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      ReservedConcurrentExecutions: 10
+      Environment:
+        Variables:
+          JOBS_TABLE: !Ref JobsTable
+          CREDITS_TABLE: !Ref CreditsTable
+          LEDGER_TABLE: !Ref LedgerTable
+          OPENAI_API_KEY: !Sub '{{resolve:secretsmanager:fertilia/openai:SecretString:api_key}}'
+          LLM_MODEL: gpt-4.1
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CreditsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LedgerTable
+        - CloudWatchPutMetricPolicy: {}
+        - SSMParameterReadPolicy:
+            ParameterName: fertilia/pricing/*
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:fertilia/openai*'
+      Events:
+        VideoRendered:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - video.generation
+              detail-type:
+                - video.rendered
+        VideoFailed:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - video.generation
+              detail-type:
+                - video.failed
+        ScheduledScan:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Description: Catch-up scan for unreconciled jobs
+
+  # DynamoDB Tables
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub Jobs-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: jobId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jobId
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  CreditsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub Credits-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  LedgerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub Ledger-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ledgerId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+        - AttributeName: jobId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ledgerId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserIdIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: JobIdIndex
+          KeySchema:
+            - AttributeName: jobId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # EventBridge Event Bus (if using custom bus)
+  VideoEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub video-events-${Environment}
+
+  # Dead Letter Queue for failed events
+  ReconcilerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub cc-agent-reconciler-dlq-${Environment}
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  # Lambda Error Alarm
+  ReconcilerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub cc-agent-reconciler-errors-${Environment}
+      AlarmDescription: Alert when reconciler Lambda has errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ReconcilerFunction
+
+  # Custom Metric Alarm
+  AdjustmentRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub cc-agent-reconciler-adjustments-${Environment}
+      AlarmDescription: Alert on high adjustment rate
+      MetricName: Adjustments
+      Namespace: Reconciler
+      Statistic: Sum
+      Period: 3600  # 1 hour
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+
+  # Lambda Log Group
+  ReconcilerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/cc-agent-reconciler-${Environment}
+      RetentionInDays: 30
+
+Outputs:
+  FunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt ReconcilerFunction.Arn
+  
+  JobsTableName:
+    Description: Jobs DynamoDB table name
+    Value: !Ref JobsTable
+  
+  CreditsTableName:
+    Description: Credits DynamoDB table name
+    Value: !Ref CreditsTable
+  
+  LedgerTableName:
+    Description: Ledger DynamoDB table name
+    Value: !Ref LedgerTable
+  
+  DLQUrl:
+    Description: Dead Letter Queue URL
+    Value: !Ref ReconcilerDLQ
