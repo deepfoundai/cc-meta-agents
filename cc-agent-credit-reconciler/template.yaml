@@ -3,6 +3,22 @@ Transform: AWS::Serverless-2016-10-31
 Description: Credit Reconciler Agent - Keeps user credit ledger aligned with video generation work
 
 Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment stage
+  TableSuffix:
+    Type: String
+    Default: dev
+    Description: Suffix for DynamoDB table names
+  BusName:
+    Type: String
+    Default: default
+    Description: EventBridge bus name
   Environment:
     Type: String
     Default: dev
@@ -10,7 +26,7 @@ Parameters:
       - dev
       - staging
       - prod
-    Description: Deployment environment
+    Description: Deployment environment (deprecated, use Stage)
 
 Globals:
   Function:
@@ -27,17 +43,22 @@ Resources:
   ReconcilerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub cc-agent-reconciler-${Environment}
+      FunctionName: !Sub cc-agent-reconciler-${Stage}
       CodeUri: src/
       Handler: handler.lambda_handler
       ReservedConcurrentExecutions: 10
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt ReconcilerDLQ.Arn
+      Layers:
+        - !Ref SharedLayer
       Environment:
         Variables:
           JOBS_TABLE: !Ref JobsTable
           CREDITS_TABLE: !Ref CreditsTable
           LEDGER_TABLE: !Ref LedgerTable
-          OPENAI_API_KEY: !Sub '{{resolve:secretsmanager:fertilia/openai:SecretString:api_key}}'
           LLM_MODEL: gpt-4.1
+          STAGE: !Ref Stage
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref JobsTable
@@ -53,11 +74,20 @@ Resources:
             - Effect: Allow
               Action:
                 - secretsmanager:GetSecretValue
-              Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:fertilia/openai*'
+              Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:meta-agents/openai*'
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt ReconcilerDLQ.Arn
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref OpsAlertsTopic
       Events:
         VideoRendered:
           Type: EventBridgeRule
           Properties:
+            EventBusName: !Ref BusName
             Pattern:
               source:
                 - video.generation
@@ -66,6 +96,7 @@ Resources:
         VideoFailed:
           Type: EventBridgeRule
           Properties:
+            EventBusName: !Ref BusName
             Pattern:
               source:
                 - video.generation
@@ -81,7 +112,7 @@ Resources:
   JobsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub Jobs-${Environment}
+      TableName: !Sub Jobs-${TableSuffix}
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: jobId
@@ -97,7 +128,7 @@ Resources:
   CreditsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub Credits-${Environment}
+      TableName: !Sub Credits-${TableSuffix}
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: userId
@@ -111,7 +142,7 @@ Resources:
   LedgerTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub Ledger-${Environment}
+      TableName: !Sub Ledger-${TableSuffix}
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: ledgerId
@@ -147,37 +178,40 @@ Resources:
   VideoEventBus:
     Type: AWS::Events::EventBus
     Properties:
-      Name: !Sub video-events-${Environment}
+      Name: !Sub video-events-${Stage}
 
   # Dead Letter Queue for failed events
   ReconcilerDLQ:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub cc-agent-reconciler-dlq-${Environment}
+      QueueName: !Sub cc-reconciler-dlq-${Stage}
       MessageRetentionPeriod: 1209600  # 14 days
 
   # Lambda Error Alarm
   ReconcilerErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub cc-agent-reconciler-errors-${Environment}
-      AlarmDescription: Alert when reconciler Lambda has errors
+      AlarmName: !Sub cc-reconciler-errors-${Stage}
+      AlarmDescription: Alert when reconciler Lambda has errors ≥1 in 5 min
       MetricName: Errors
       Namespace: AWS/Lambda
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1
-      Threshold: 5
-      ComparisonOperator: GreaterThanThreshold
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
       Dimensions:
         - Name: FunctionName
           Value: !Ref ReconcilerFunction
+      AlarmActions:
+        - !Ref OpsAlertsTopic
+      TreatMissingData: notBreaching
 
   # Custom Metric Alarm
   AdjustmentRateAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub cc-agent-reconciler-adjustments-${Environment}
+      AlarmName: !Sub cc-reconciler-adjustments-${Stage}
       AlarmDescription: Alert on high adjustment rate
       MetricName: Adjustments
       Namespace: Reconciler
@@ -191,8 +225,49 @@ Resources:
   ReconcilerLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /aws/lambda/cc-agent-reconciler-${Environment}
+      LogGroupName: !Sub /aws/lambda/cc-agent-reconciler-${Stage}
       RetentionInDays: 30
+
+  # SNS Topic for operational alerts
+  OpsAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ops-alerts-${Stage}
+      DisplayName: !Sub "Operational Alerts - ${Stage}"
+
+  # SNS Topic Policy
+  OpsAlertsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowLambdaPublish
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sns:Publish
+            Resource: !Ref OpsAlertsTopic
+          - Sid: AllowCloudWatchPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - sns:Publish
+            Resource: !Ref OpsAlertsTopic
+      Topics:
+        - !Ref OpsAlertsTopic
+
+  # Shared Lambda Layer for secrets manager
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub meta-agents-shared-${Stage}
+      ContentUri: ../shared/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Retain
 
 Outputs:
   FunctionArn:
@@ -214,3 +289,7 @@ Outputs:
   DLQUrl:
     Description: Dead Letter Queue URL
     Value: !Ref ReconcilerDLQ
+  
+  OpsAlertsTopicArn:
+    Description: SNS Topic ARN for operational alerts
+    Value: !Ref OpsAlertsTopic

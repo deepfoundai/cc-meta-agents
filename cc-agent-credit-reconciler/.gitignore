@@ -16,6 +16,7 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -25,40 +26,115 @@ MANIFEST
 venv/
 ENV/
 env/
-.venv
+.venv/
+.env/
+.virtualenv/
+pip-selfcheck.json
 
-# Testing
-.coverage
-.pytest_cache/
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
 htmlcov/
 .tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
 coverage.xml
 *.cover
+*.py,cover
 .hypothesis/
+.pytest_cache/
+cover/
 
-# AWS SAM
+# AWS SAM & Lambda
 .aws-sam/
-samconfig.toml
+samconfig*.toml
+!samconfig.toml
+.serverless/
+function.zip
+*.zip
+layers/
+lambda-layer/
 
-# IDE
+# Environment & Secrets (never commit these!)
+.env*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+config/local.json
+config/development.json
+
+# IDE & Editors
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.vs/
+*.sublime-*
 
 # OS
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+ehthumbs.db
 Thumbs.db
-
-# Environment files
-.env
-.env.local
-.env.*.local
+Desktop.ini
 
 # Logs
-*.log
 logs/
+*.log
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Documentation
+docs/_build/
+doc/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# CDK
+cdk.out/
+
+# Deployment artifacts
+deployment-package.zip
+lambda-deployment-package.zip
 
 # Temporary files
 *.tmp

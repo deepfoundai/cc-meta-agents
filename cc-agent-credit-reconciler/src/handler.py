@@ -6,9 +6,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any, Optional
 import logging
-import openai
 from boto3.dynamodb.conditions import Key, Attr
 from botocore.exceptions import ClientError
+import sys
+sys.path.insert(0, '/opt')  # For Lambda layer
+from secrets_manager import secrets_manager
 
 # Initialize logging
 logger = logging.getLogger()
@@ -24,13 +26,8 @@ JOBS_TABLE = os.environ.get('JOBS_TABLE', 'Jobs')
 CREDITS_TABLE = os.environ.get('CREDITS_TABLE', 'Credits')
 LEDGER_TABLE = os.environ.get('LEDGER_TABLE', 'Ledger')
 
-# OpenAI setup
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+# LLM model configuration
 LLM_MODEL = os.environ.get('LLM_MODEL', 'gpt-4.1')
-client = None
-
-if OPENAI_API_KEY:
-    client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -418,25 +415,32 @@ def is_anomaly(cost: Decimal, seconds: int, detail: Dict[str, Any]) -> bool:
 
 def invoke_llm(prompt: str) -> Optional[str]:
     """Invoke LLM for anomaly explanation or other assistance."""
-    if not OPENAI_API_KEY or not client:
-        logger.warning("OpenAI API key not configured, skipping LLM invocation")
-        return None
-    
     try:
-        model = os.getenv("LLM_MODEL", "gpt-4.1")
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a concise assistant analyzing video generation anomalies."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=100,
-            temperature=0.3
+        from openai import OpenAI
+        
+        # Get API key from Secrets Manager
+        api_key = secrets_manager.get_openai_api_key()
+        if not api_key:
+            logger.error("OpenAI API key not found in Secrets Manager")
+            return "Anomaly detected - manual review recommended"
+        
+        # Initialize without proxy settings to avoid Lambda issues
+        import httpx
+        client = OpenAI(
+            api_key=api_key,
+            http_client=httpx.Client(proxies=None)
         )
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=100,
+            temperature=0.7
+        )
+        
         return response.choices[0].message.content.strip()
     except Exception as e:
-        logger.error(f"LLM invocation error: {e}")
-        return f"LLM analysis failed: {str(e)}"
+        logger.error(f"LLM invocation failed: {e}")
+        return "Anomaly detected - manual review recommended"
 
 
 def emit_metric(metric_name: str, value: float, unit: str = 'Count'):

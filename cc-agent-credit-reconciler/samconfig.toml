@@ -1,0 +1,58 @@
+version = 0.1
+
+[default]
+[default.global.parameters]
+stack_name = "cc-agent-credit-reconciler-dev"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+resolve_s3 = true
+s3_prefix = "cc-agent-reconciler-dev"
+region = "us-east-1"
+parameter_overrides = "Stage=dev TableSuffix=dev BusName=default"
+
+[default.validate.parameters]
+lint = true
+
+[default.sync.parameters]
+watch = true
+
+[default.local_start_api.parameters]
+warm_containers = "EAGER"
+
+[prod]
+[prod.global.parameters]
+stack_name = "cc-agent-credit-reconciler-prod"
+
+[prod.build.parameters]
+cached = true
+parallel = true
+
+[prod.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+resolve_s3 = true
+s3_prefix = "cc-agent-reconciler-prod"
+region = "us-east-1"
+parameter_overrides = "Stage=prod TableSuffix=prod BusName=default"
+
+[staging]
+[staging.global.parameters]
+stack_name = "cc-agent-credit-reconciler-staging"
+
+[staging.build.parameters]
+cached = true
+parallel = true
+
+[staging.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+resolve_s3 = true
+s3_prefix = "cc-agent-reconciler-staging"
+region = "us-east-1"
+parameter_overrides = "Stage=staging TableSuffix=staging BusName=default"

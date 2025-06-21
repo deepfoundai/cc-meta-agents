@@ -7,7 +7,7 @@ import json
 import time
 import boto3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Dict, Any
 import argparse
@@ -33,7 +33,7 @@ class SmokeTestRunner:
         self.cf_client = boto3.client('cloudformation', region_name=self.region)
         
         # Get stack outputs
-        self.stack_name = f"cc-agent-reconciler-{environment}"
+        self.stack_name = f"cc-agent-credit-reconciler-{environment}"
         self._load_stack_outputs()
         
         # Test data
@@ -326,8 +326,15 @@ class SmokeTestRunner:
             # Second invocation (should be idempotent)
             response2 = self.invoke_lambda(event)
             
-            body2 = json.loads(response2.get('body', '{}'))
-            if 'Already processed' in body2.get('message', ''):
+            # Handle both string and dict responses
+            body2 = response2.get('body', '{}')
+            if isinstance(body2, str):
+                try:
+                    body2 = json.loads(body2)
+                except json.JSONDecodeError:
+                    body2 = {'message': body2}
+            
+            if 'Already processed' in str(body2.get('message', '')) or 'Already processed' in str(body2):
                 print(f"{GREEN}  ✅ Idempotency check passed{NC}")
                 return True
             else:
@@ -389,8 +396,8 @@ class SmokeTestRunner:
                 Dimensions=[
                     {'Name': 'FunctionName', 'Value': self.function_name}
                 ],
-                StartTime=datetime.utcnow().replace(hour=0, minute=0, second=0),
-                EndTime=datetime.utcnow(),
+                StartTime=datetime.now(timezone.utc).replace(hour=0, minute=0, second=0),
+                EndTime=datetime.now(timezone.utc),
                 Period=3600,
                 Statistics=['Sum']
             )
@@ -405,8 +412,8 @@ class SmokeTestRunner:
             response = self.cloudwatch.get_metric_statistics(
                 Namespace='Reconciler',
                 MetricName='Adjustments',
-                StartTime=datetime.utcnow().replace(hour=0, minute=0, second=0),
-                EndTime=datetime.utcnow(),
+                StartTime=datetime.now(timezone.utc).replace(hour=0, minute=0, second=0),
+                EndTime=datetime.now(timezone.utc),
                 Period=3600,
                 Statistics=['Sum']
             )
