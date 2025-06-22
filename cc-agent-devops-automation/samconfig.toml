@@ -1,0 +1,21 @@
+version = 0.1
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "cc-agent-devops-automation-dev"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-r9wzfbzlnc17"
+s3_prefix = "cc-agent-devops-automation"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Stage=dev"
+
+[prod]
+[prod.deploy]
+[prod.deploy.parameters]
+stack_name = "cc-agent-devops-automation-prod"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-r9wzfbzlnc17"
+s3_prefix = "cc-agent-devops-automation"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Stage=prod"

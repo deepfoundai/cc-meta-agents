@@ -7,8 +7,10 @@ import re
 from datetime import datetime
 from typing import List, Dict, Any
 from collections import Counter
-import openai
 from pythonjsonlogger import jsonlogger
+import sys
+sys.path.insert(0, '/opt')  # For Lambda layer
+from secrets_manager import secrets_manager
 
 from .sources.trends_scrapers import TrendsScraper
 
@@ -26,7 +28,6 @@ cloudwatch = boto3.client("cloudwatch")
 TABLE_NAME = os.environ.get("DDB_TABLE_NAME")
 BUCKET = os.environ.get("S3_BUCKET")
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4")
-openai.api_key = os.environ.get("OPENAI_API_KEY")
 
 def lambda_handler(event, context):
     run_date = datetime.utcnow().strftime("%Y-%m-%d")
@@ -131,7 +132,21 @@ def generate_prompts(scored_phrases: List[Dict[str, Any]]) -> List[Dict[str, Any
 
 Include cinematic cues and make it visually compelling. Return only the prompt text, nothing else."""
 
-            response = openai.ChatCompletion.create(
+            from openai import OpenAI
+            
+            # Get API key from Secrets Manager
+            api_key = secrets_manager.get_openai_api_key()
+            if not api_key:
+                logger.error("OpenAI API key not found in Secrets Manager")
+                continue
+                
+            # Initialize without proxy settings to avoid Lambda issues
+            import httpx
+            client = OpenAI(
+                api_key=api_key,
+                http_client=httpx.Client(proxies=None)
+            )
+            response = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},

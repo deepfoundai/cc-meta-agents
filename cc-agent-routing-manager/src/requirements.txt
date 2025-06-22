@@ -1,0 +1,2 @@
+# Production dependencies only
+# boto3 is provided by Lambda runtime

@@ -1,0 +1,20 @@
+{
+  "version": "0",
+  "id": "test-event-456",
+  "detail-type": "devops.request",
+  "source": "agent.DocRegistry",
+  "account": "123456789012",
+  "time": "2025-06-21T12:00:00Z",
+  "region": "us-east-1",
+  "detail": {
+    "requestId": "deploy-lambda-test-456",
+    "action": "deployLambda",
+    "stage": "dev",
+    "params": {
+      "stackName": "cc-agent-doc-registry",
+      "stage": "dev"
+    },
+    "requestedBy": "DocRegistry",
+    "ts": "2025-06-21T12:00:00Z"
+  }
+} 

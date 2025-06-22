@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  MRR Reporter Agent - Daily calculation of MRR from Stripe
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 256
+    Runtime: python3.12
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment
+
+Resources:
+  # DynamoDB Table for storing MRR data
+  BillingMetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: BillingMetrics
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Agent
+          Value: MRRReporter
+        - Key: Environment
+          Value: !Ref Environment
+
+  MRRReporterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      Description: MRR Reporter - Calculates MRR from Stripe daily
+      Environment:
+        Variables:
+          MRR_TABLE_NAME: !Ref BillingMetricsTable
+          STRIPE_SECRET_NAME: /contentcraft/stripe/api_key
+      Policies:
+        # DynamoDB permissions
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BillingMetricsTable
+        # Secrets Manager
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/contentcraft/stripe/api_key*'
+        # EventBridge
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - events:PutEvents
+              Resource: '*'
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 6 * * ? *)  # Daily at 6 AM UTC
+            Name: !Sub ${AWS::StackName}-DailyMRRReport
+            Description: Daily MRR calculation from Stripe
+            Enabled: true
+      Tags:
+        Agent: MRRReporter
+        Environment: !Ref Environment
+
+Outputs:
+  MRRReporterFunctionArn:
+    Description: ARN of the MRR Reporter Lambda function
+    Value: !GetAtt MRRReporterFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-FunctionArn
+
+  BillingMetricsTableName:
+    Description: Name of the Billing Metrics DynamoDB table
+    Value: !Ref BillingMetricsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-TableName
+
+  ScheduleRuleName:
+    Description: Name of the EventBridge schedule rule
+    Value: !Sub ${AWS::StackName}-DailyMRRReport
+    Export:
+      Name: !Sub ${AWS::StackName}-ScheduleRule

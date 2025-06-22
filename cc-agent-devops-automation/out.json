@@ -1,0 +1,1 @@
+{"statusCode": 200, "body": "{\"status\": \"healthy\", \"agent\": \"DevOpsAutomation\", \"version\": \"1.0\", \"capabilities\": [\"github_repo_check\", \"workflow_monitor\", \"heartbeat_metrics\", \"agent_registration\"], \"timestamp\": \"2025-06-21T22:58:17.976900+00:00\"}"}

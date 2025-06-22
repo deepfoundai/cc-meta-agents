@@ -1,0 +1,9 @@
+{
+  "Entries": [
+    {
+      "Source": "frontend.api",
+      "DetailType": "video.job.submitted",
+      "Detail": "{\"jobId\": \"test-job-123\", \"userId\": \"user-456\", \"prompt\": \"A happy corgi surfing on a wave at sunset\", \"lengthSec\": 8, \"resolution\": \"720p\", \"tier\": \"standard\", \"provider\": \"auto\"}"
+    }
+  ]
+}

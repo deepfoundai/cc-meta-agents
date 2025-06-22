@@ -1,0 +1,5 @@
+{
+  "task_type": "workflow_monitor",
+  "repository": "cc-agent-doc-registry",
+  "workflow": "update-registry.yml"
+}

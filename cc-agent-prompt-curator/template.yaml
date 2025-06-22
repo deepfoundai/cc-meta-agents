@@ -13,10 +13,6 @@ Parameters:
   LLMModel:
     Type: String
     Default: gpt-4
-  OpenAIAPIKey:
-    Type: String
-    Default: "test-key-for-deployment"
-    NoEcho: true
 
 Globals:
   Function:
@@ -26,7 +22,6 @@ Globals:
     Environment:
       Variables:
         LLM_MODEL: !Ref LLMModel
-        OPENAI_API_KEY: !Ref OpenAIAPIKey
 
 Resources:
   PromptCuratorFunction:
@@ -34,6 +29,8 @@ Resources:
     Properties:
       CodeUri: .
       Handler: src.handler.lambda_handler
+      Layers:
+        - !Ref SharedLayer
       Environment:
         Variables:
           DDB_TABLE_NAME: !Ref PromptTemplatesTable
@@ -52,6 +49,12 @@ Resources:
         - EventBridgePutEventsPolicy:
             EventBusName: default
         - CloudWatchPutMetricPolicy: {}
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:meta-agents/openai*'
 
   PromptTemplatesTable:
     Type: AWS::DynamoDB::Table
@@ -92,6 +95,16 @@ Resources:
             Principal: '*'
             Action: s3:GetObject
             Resource: !Sub "${PromptTemplatesBucket.Arn}/*"
+
+  # Shared Lambda Layer for secrets manager
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub meta-agents-shared-${Environment}
+      ContentUri: ../shared/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Retain
 
 Outputs:
   PromptCuratorFunctionArn:

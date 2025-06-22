@@ -1,0 +1,19 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "cc-agent-mrr-reporter"
+region = "us-east-1"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = [
+    "Environment=dev"
+]
+
+[default.build.parameters]
+use_container = true
+
+[default.sync.parameters]
+watch = false
+warm_containers = "EAGER"
+
+[default.validate.parameters]

@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CC Agent DevOps Automation - GitHub and AWS infrastructure automation
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues:
+    - dev
+    - prod
+    Description: Deployment stage
+Globals:
+  Function:
+    Timeout: 300
+    Runtime: python3.12
+    MemorySize: 512
+    Environment:
+      Variables:
+        STAGE:
+          Ref: Stage
+Resources:
+  DevOpsAutomationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: cc-agent-devops-automation-${Stage}
+      CodeUri: DevOpsAutomationFunction
+      Handler: handler.lambda_handler
+      Description: Handles GitHub repo management and monitoring tasks
+      Environment:
+        Variables:
+          GITHUB_TOKEN_SECRET: /contentcraft/github/token
+      Policies:
+      - SecretsManagerReadWrite
+      - CloudWatchPutMetricPolicy: {}
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - ssm:GetParameter
+          - ssm:PutParameter
+          Resource:
+          - Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/contentcraft/agents/enabled
+        - Effect: Allow
+          Action:
+          - secretsmanager:CreateSecret
+          - secretsmanager:PutSecretValue
+          - secretsmanager:TagResource
+          - secretsmanager:DescribeSecret
+          Resource:
+          - Fn::Sub: arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/contentcraft/*
+        - Effect: Allow
+          Action:
+          - cloudformation:CreateChangeSet
+          - cloudformation:ExecuteChangeSet
+          - cloudformation:DescribeStacks
+          - cloudformation:DescribeChangeSet
+          - cloudformation:ListStacks
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - events:PutEvents
+          Resource: '*'
+      Events:
+        HeartbeatSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Input: '{"task_type": "health_check"}'
+            Description: DevOps Agent heartbeat for ecosystem monitoring
+        DailyRepoCheck:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 7 * * ? *)
+            Input: '{"task_type": "github_repo_check"}'
+        WorkflowMonitor:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Input: '{"task_type": "workflow_monitor"}'
+        DevOpsRequestRule:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: default
+            Pattern:
+              source:
+              - prefix: agent.
+              detail-type:
+              - devops.request
+    Metadata:
+      SamResourceId: DevOpsAutomationFunction
+  StripeMrrReporterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: StripeMrrReporterFn-${Stage}
+      CodeUri: StripeMrrReporterFunction
+      Handler: mrr_reporter.lambda_handler
+      Description: Calculates and reports MRR from Stripe transactions
+      Layers:
+      - Ref: StripeLayer
+      Environment:
+        Variables:
+          BILLING_METRICS_TABLE:
+            Ref: BillingMetricsTable
+          STRIPE_SECRET_PATH: /contentcraft/stripe/reporting_api_key
+      Policies:
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - secretsmanager:GetSecretValue
+          Resource:
+            Fn::Sub: arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/contentcraft/stripe/reporting_api_key*
+        - Effect: Allow
+          Action:
+          - dynamodb:PutItem
+          Resource:
+            Fn::GetAtt:
+            - BillingMetricsTable
+            - Arn
+        - Effect: Allow
+          Action:
+          - events:PutEvents
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource: '*'
+      Events:
+        DailyMrrCalculation:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 6 * * ? *)
+    Metadata:
+      SamResourceId: StripeMrrReporterFunction
+  StripeLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName:
+        Fn::Sub: stripe-sdk-layer-${Stage}
+      Description: Stripe Python SDK
+      ContentUri: ../../layers
+      CompatibleRuntimes:
+      - python3.12
+      RetentionPolicy: Delete
+  BillingMetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: BillingMetrics-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: PK
+        AttributeType: S
+      - AttributeName: SK
+        AttributeType: S
+      KeySchema:
+      - AttributeName: PK
+        KeyType: HASH
+      - AttributeName: SK
+        KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+      - Key: Service
+        Value: ContentCraft
+      - Key: Component
+        Value: BillingMetrics
+      - Key: Stage
+        Value:
+          Ref: Stage
+Outputs:
+  DevOpsAutomationFunctionArn:
+    Description: ARN of the DevOps automation function
+    Value:
+      Fn::GetAtt:
+      - DevOpsAutomationFunction
+      - Arn
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-DevOpsAutomationFunctionArn
+  StripeMrrReporterFunctionArn:
+    Description: ARN of the Stripe MRR reporter function
+    Value:
+      Fn::GetAtt:
+      - StripeMrrReporterFunction
+      - Arn
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-StripeMrrReporterFunctionArn

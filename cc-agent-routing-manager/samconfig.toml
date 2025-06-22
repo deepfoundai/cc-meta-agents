@@ -1,0 +1,30 @@
+version = 0.1
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "routing-manager"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1234567890"
+s3_prefix = "routing-manager"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Stage=\"dev\""
+
+[dev]
+[dev.deploy]
+[dev.deploy.parameters]
+stack_name = "routing-manager-dev"
+parameter_overrides = "Stage=\"dev\" FalQueueUrl=\"\" ReplicateQueueUrl=\"\""
+
+[staging]
+[staging.deploy]
+[staging.deploy.parameters]
+stack_name = "routing-manager-staging"
+parameter_overrides = "Stage=\"staging\" FalQueueUrl=\"\" ReplicateQueueUrl=\"\""
+
+[prod]
+[prod.deploy]
+[prod.deploy.parameters]
+stack_name = "routing-manager-prod"
+parameter_overrides = "Stage=\"prod\" FalQueueUrl=\"\" ReplicateQueueUrl=\"\""

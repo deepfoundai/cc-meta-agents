@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Routing-Manager Agent (AGENT-06) - Routes video jobs to appropriate providers
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.12
+    MemorySize: 256
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment stage
+  
+  FalQueueUrl:
+    Type: String
+    Description: SQS Queue URL for FAL jobs
+  
+  ReplicateQueueUrl:
+    Type: String
+    Description: SQS Queue URL for Replicate jobs
+
+Resources:
+  # Dead Letter Queue for failed events
+  RoutingManagerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Service
+          Value: RoutingManager
+        - Key: Stage
+          Value: !Ref Stage
+
+  RoutingManagerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-routing-manager'
+      Description: Routes video.job.submitted events to provider queues
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt RoutingManagerDLQ.Arn
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource:
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Jobs-${Stage}'
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource:
+                - !Sub 'arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:FalJobQueue'
+                - !Sub 'arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:ReplicateJobQueue'
+            - Effect: Allow
+              Action:
+                - events:PutEvents
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt RoutingManagerDLQ.Arn
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+          FAL_QUEUE_URL: !Ref FalQueueUrl
+          REPLICATE_QUEUE_URL: !Ref ReplicateQueueUrl
+      Events:
+        VideoJobSubmitted:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - frontend.api
+              detail-type:
+                - video.job.submitted
+        Heartbeat:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Description: Heartbeat for agent health monitoring
+
+  # CloudWatch Alarms
+  NoRoutingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-no-routing'
+      AlarmDescription: Alert when routing manager stops processing jobs
+      MetricName: RoutingAttempts
+      Namespace: VideoJobRouting
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+  
+  HighRejectionRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-high-rejection-rate'
+      AlarmDescription: Alert when too many jobs are rejected
+      MetricName: RoutingAttempts
+      Namespace: VideoJobRouting
+      Dimensions:
+        - Name: Success
+          Value: 'False'
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+  
+  DLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-dlq-messages'
+      AlarmDescription: Alert when messages are in the DLQ
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt RoutingManagerDLQ.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  RoutingManagerFunctionArn:
+    Description: ARN of the Routing Manager Lambda function
+    Value: !GetAtt RoutingManagerFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-function-arn'
+  
+  RoutingManagerFunctionName:
+    Description: Name of the Routing Manager Lambda function
+    Value: !Ref RoutingManagerFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-function-name'
+  
+  DLQUrl:
+    Description: Dead Letter Queue URL
+    Value: !Ref RoutingManagerDLQ
+    Export:
+      Name: !Sub '${AWS::StackName}-dlq-url'
