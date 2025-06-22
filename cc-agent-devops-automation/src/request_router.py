@@ -37,6 +37,8 @@ def handle_devops_request(event: Dict[str, Any], context: Any) -> Dict[str, Any]
             result = handle_put_secret(params, stage)
         elif action == 'deployLambda':
             result = handle_deploy_lambda(params, stage)
+        elif action == 'agentWork':
+            result = handle_agent_work(params, detail)
         else:
             raise ValueError(f"Unsupported action: {action}")
         
@@ -203,6 +205,144 @@ def handle_deploy_lambda(params: Dict[str, Any], stage: str) -> Dict[str, Any]:
         
     except Exception as e:
         raise Exception(f"Failed to deploy stack {full_stack_name}: {str(e)}")
+
+def handle_agent_work(params: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle agentWork action - route GitHub issue work to appropriate agent
+    """
+    import base64
+    
+    # For agentWork, the data is in payload, not params
+    payload = detail.get('payload', params)  # Fallback to params for backward compatibility
+    
+    agent = detail.get('agent')
+    spec_b64 = payload.get('spec', '')
+    deadline = payload.get('deadline', 'none')
+    deps_b64 = payload.get('deps', '')
+    issue_number = payload.get('issueNumber', 'unknown')
+    issue_title = payload.get('issueTitle', 'Untitled Task')
+    issue_url = payload.get('issueUrl', '')
+    
+    if not agent:
+        raise ValueError("agentWork requires 'agent' field")
+    
+    if not spec_b64:
+        raise ValueError("agentWork requires 'spec' field")
+    
+    try:
+        # Decode the base64-encoded specification
+        spec = base64.b64decode(spec_b64).decode('utf-8')
+        deps = base64.b64decode(deps_b64).decode('utf-8') if deps_b64 else ''
+        
+        print(f"Agent work request for {agent}:")
+        print(f"  Issue: #{issue_number} - {issue_title}")
+        print(f"  Spec: {spec[:100]}..." if len(spec) > 100 else f"  Spec: {spec}")
+        print(f"  Deadline: {deadline}")
+        print(f"  Dependencies: {deps}" if deps else "  Dependencies: None")
+        
+        # Route to specific agent based on agent name
+        if agent == 'DevOpsAutomation':
+            result = handle_devops_agent_work(spec, issue_number, issue_title, deadline, deps)
+        else:
+            # For other agents, publish to their specific EventBridge pattern
+            result = route_to_agent(agent, spec, issue_number, issue_title, deadline, deps, issue_url)
+        
+        return {
+            'agent': agent,
+            'issueNumber': issue_number,
+            'action': 'work_dispatched',
+            'result': result
+        }
+        
+    except Exception as e:
+        raise Exception(f"Failed to handle agent work for {agent}: {str(e)}")
+
+def handle_devops_agent_work(spec: str, issue_number: str, issue_title: str, deadline: str, deps: str) -> Dict[str, Any]:
+    """
+    Handle work specifically assigned to DevOpsAutomation agent
+    """
+    print(f"Processing DevOps work from issue #{issue_number}")
+    
+    # Simple pattern matching for common DevOps tasks
+    spec_lower = spec.lower()
+    
+    if 'deploy' in spec_lower and 'lambda' in spec_lower:
+        # Extract stack name from spec if possible
+        lines = spec.split('\n')
+        stack_name = None
+        for line in lines:
+            if 'stack' in line.lower():
+                # Try to extract stack name from patterns like "stack: cc-agent-xyz" or "deploy cc-agent-xyz"
+                import re
+                match = re.search(r'(cc-agent-[\w-]+)', line)
+                if match:
+                    stack_name = match.group(1)
+                    break
+        
+        if stack_name:
+            print(f"Deploying stack: {stack_name}")
+            return handle_deploy_lambda({'stackName': stack_name}, 'prod')
+        else:
+            return {'action': 'manual_review_required', 'reason': 'Could not extract stack name from spec'}
+    
+    elif 'secret' in spec_lower and ('create' in spec_lower or 'update' in spec_lower):
+        return {'action': 'manual_review_required', 'reason': 'Secret operations require manual review for security'}
+    
+    else:
+        # Generic DevOps task - mark as processed but requiring manual follow-up
+        return {
+            'action': 'acknowledged',
+            'note': f'DevOps task from issue #{issue_number} acknowledged and queued for manual processing',
+            'spec_preview': spec[:200] + '...' if len(spec) > 200 else spec
+        }
+
+def route_to_agent(agent: str, spec: str, issue_number: str, issue_title: str, deadline: str, deps: str, issue_url: str) -> Dict[str, Any]:
+    """
+    Route work to other agents via EventBridge
+    """
+    agent_event_mapping = {
+        'CostSentinel': 'cost.sentinel.request',
+        'FalInvoker': 'fal.invoker.request', 
+        'RoutingManager': 'routing.manager.request',
+        'PromptCurator': 'prompt.curator.request',
+        'CreditReconciler': 'credit.reconciler.request',
+        'DocRegistry': 'doc.registry.request',
+        'MrrReporter': 'mrr.reporter.request'
+    }
+    
+    event_type = agent_event_mapping.get(agent)
+    if not event_type:
+        raise ValueError(f"Unknown agent: {agent}")
+    
+    # Publish agent-specific work event
+    work_event = {
+        'Source': 'github.issues',
+        'DetailType': event_type,
+        'Detail': json.dumps({
+            'workType': 'github_issue',
+            'issueNumber': issue_number,
+            'issueTitle': issue_title,
+            'issueUrl': issue_url,
+            'spec': spec,
+            'deadline': deadline,
+            'dependencies': deps,
+            'requestedAt': datetime.now(timezone.utc).isoformat()
+        })
+    }
+    
+    try:
+        events_client.put_events(Entries=[work_event])
+        print(f"Routed work to {agent} via {event_type}")
+        
+        return {
+            'action': 'routed_to_agent',
+            'agent': agent,
+            'eventType': event_type,
+            'issueNumber': issue_number
+        }
+        
+    except Exception as e:
+        raise Exception(f"Failed to route work to {agent}: {str(e)}")
 
 def publish_completion_event(completion_data: Dict[str, Any]) -> None:
     """
