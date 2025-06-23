@@ -5,56 +5,121 @@ import uuid
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
+import jsonschema
+from capability_registry import get_handler, validate_action, list_capabilities
 
 # Initialize AWS clients
 secrets_manager = boto3.client('secretsmanager')
 cloudformation = boto3.client('cloudformation')
 events_client = boto3.client('events')
 
+# JSON Schema for devops.request validation
+REQUEST_SCHEMA = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["requestId", "action", "stage", "requestedBy", "agent", "payload", "ts"],
+    "properties": {
+        "requestId": {
+            "type": "string",
+            "description": "Unique identifier for the work request"
+        },
+        "action": {
+            "type": "string",
+            "enum": ["deploy_stack", "bootstrap_repo_secrets", "putSecret", "deployLambda", "agentWork"],
+            "description": "Action to execute"
+        },
+        "stage": {
+            "type": "string",
+            "enum": ["dev", "prod"],
+            "description": "Deployment environment"
+        },
+        "requestedBy": {
+            "type": "string",
+            "description": "Requesting entity (GitHubCI, agent name, etc.)"
+        },
+        "agent": {
+            "type": "string",
+            "enum": ["DevOpsAutomation"],
+            "description": "Target agent for work execution"
+        },
+        "payload": {
+            "type": "object",
+            "description": "Action-specific parameters"
+        },
+        "ts": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Request timestamp in ISO 8601 format"
+        }
+    }
+}
+
 def handle_devops_request(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    Handle EventBridge devops.request events
-    Routes to appropriate action handler and publishes completion events
+    Handle EventBridge devops.request events with structured routing and validation
+    Validates payload against JSON Schema and dispatches to capability registry
     """
     start_time = time.time()
     
     try:
         # Extract request details from EventBridge event
         detail = event.get('detail', {})
-        request_id = detail.get('requestId', str(uuid.uuid4()))
+        
+        # Validate request against JSON Schema
+        try:
+            jsonschema.validate(detail, REQUEST_SCHEMA)
+        except jsonschema.ValidationError as e:
+            error_msg = f"Schema validation failed: {e.message}"
+            return _handle_error(detail, error_msg, "schema_validation_failed", start_time)
+        
+        request_id = detail.get('requestId')
         action = detail.get('action')
-        stage = detail.get('stage', 'dev')
-        params = detail.get('params', {})
-        requested_by = detail.get('requestedBy', 'unknown')
+        stage = detail.get('stage')
+        payload = detail.get('payload', {})
+        requested_by = detail.get('requestedBy')
         
         print(f"Processing devops.request: {request_id} - {action} from {requested_by}")
         
-        if not action:
-            raise ValueError("Missing required 'action' field")
+        # Validate action is supported
+        if not validate_action(action):
+            error_msg = f"Unsupported action: {action}. Supported actions: {list_capabilities()}"
+            return _handle_error(detail, error_msg, "unsupported_action", start_time)
         
-        # Route to appropriate handler
-        if action == 'putSecret':
-            result = handle_put_secret(params, stage)
-        elif action == 'deployLambda':
-            result = handle_deploy_lambda(params, stage)
-        elif action == 'agentWork':
-            result = handle_agent_work(params, detail)
-        else:
-            raise ValueError(f"Unsupported action: {action}")
+        # Dispatch to appropriate handler via capability registry
+        try:
+            handler = get_handler(action)
+            
+            # Handle legacy actions differently
+            if action in ['putSecret', 'deployLambda']:
+                result = handler(payload, stage)
+            elif action == 'agentWork':
+                result = handle_agent_work(payload, detail)
+            else:
+                # New structured handlers
+                result = handler(request_id, payload, stage)
+                
+        except Exception as handler_error:
+            error_msg = f"Handler execution failed: {str(handler_error)}"
+            return _handle_error(detail, error_msg, "handler_execution_failed", start_time)
         
         # Calculate latency
         latency_ms = int((time.time() - start_time) * 1000)
         
-        # Publish completion event
-        completion_event = {
-            'requestId': request_id,
-            'action': action,
-            'status': 'success',
-            'result': result,
-            'latencyMs': latency_ms,
-            'requestedBy': requested_by,
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }
+        # Handle structured completion events vs legacy format
+        if isinstance(result, dict) and 'status' in result:
+            # New handlers return complete completion events
+            completion_event = result
+        else:
+            # Legacy handlers return just result data
+            completion_event = {
+                'requestId': request_id,
+                'action': action,
+                'status': 'success',
+                'result': result,
+                'latencyMs': latency_ms,
+                'requestedBy': requested_by,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
         
         publish_completion_event(completion_event)
         
@@ -69,31 +134,40 @@ def handle_devops_request(event: Dict[str, Any], context: Any) -> Dict[str, Any]
         
     except Exception as e:
         error_msg = str(e)
-        latency_ms = int((time.time() - start_time) * 1000)
-        
-        print(f"DevOps request failed: {error_msg}")
-        
-        # Publish failure event
-        completion_event = {
-            'requestId': detail.get('requestId', 'unknown'),
-            'action': detail.get('action', 'unknown'),
+        return _handle_error(detail if 'detail' in locals() else {}, error_msg, "internal_error", start_time)
+
+
+def _handle_error(detail: Dict[str, Any], error_msg: str, reason: str, start_time: float) -> Dict[str, Any]:
+    """
+    Handle errors with standardized error response and completion event publishing
+    """
+    latency_ms = int((time.time() - start_time) * 1000)
+    
+    print(f"DevOps request failed: {error_msg}")
+    
+    # Publish failure event
+    completion_event = {
+        'requestId': detail.get('requestId', 'unknown'),
+        'action': detail.get('action', 'unknown'),
+        'status': 'error',
+        'error': error_msg,
+        'reason': reason,
+        'latencyMs': latency_ms,
+        'requestedBy': detail.get('requestedBy', 'unknown'),
+        'timestamp': datetime.now(timezone.utc).isoformat()
+    }
+    
+    publish_completion_event(completion_event)
+    
+    return {
+        'statusCode': 500,
+        'body': json.dumps({
             'status': 'error',
             'error': error_msg,
-            'latencyMs': latency_ms,
-            'requestedBy': detail.get('requestedBy', 'unknown'),
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }
-        
-        publish_completion_event(completion_event)
-        
-        return {
-            'statusCode': 500,
-            'body': json.dumps({
-                'status': 'error',
-                'error': error_msg,
-                'latencyMs': latency_ms
-            })
-        }
+            'reason': reason,
+            'latencyMs': latency_ms
+        })
+    }
 
 def handle_put_secret(params: Dict[str, Any], stage: str) -> Dict[str, Any]:
     """
