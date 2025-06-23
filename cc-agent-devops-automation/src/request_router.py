@@ -362,6 +362,40 @@ def publish_completion_event(completion_data: Dict[str, Any]) -> None:
         
         print(f"Published completion event for request {completion_data.get('requestId')}")
         
+        # If this is an error from a GitHub issue, post a comment
+        if (completion_data.get('status') == 'error' and 
+            completion_data.get('source') == 'agent.github' and 
+            completion_data.get('issueNumber')):
+            
+            post_github_error_comment(completion_data)
+        
     except Exception as e:
         print(f"Failed to publish completion event: {str(e)}")
-        # Don't raise - completion event failure shouldn't fail the main operation 
+        # Don't raise - completion event failure shouldn't fail the main operation
+
+def post_github_error_comment(completion_data: Dict[str, Any]) -> None:
+    """
+    Post error comment to GitHub issue when agent work fails
+    """
+    try:
+        import requests
+        import os
+        
+        issue_number = completion_data.get('issueNumber')
+        error_msg = completion_data.get('error', 'Unknown error')
+        request_id = completion_data.get('requestId', 'unknown')
+        
+        # Note: This requires GITHUB_TOKEN environment variable
+        # For now, just log the error - implementation depends on GitHub token availability
+        print(f"⚠️ Would post error comment to issue #{issue_number}:")
+        print(f"   RequestID: {request_id}")
+        print(f"   Error: {error_msg}")
+        
+        # TODO: Implement GitHub API call when GITHUB_TOKEN is available
+        # github_token = os.environ.get('GITHUB_TOKEN')
+        # if github_token:
+        #     # Post comment via GitHub API
+        #     pass
+        
+    except Exception as e:
+        print(f"Failed to post GitHub error comment: {str(e)}") 
